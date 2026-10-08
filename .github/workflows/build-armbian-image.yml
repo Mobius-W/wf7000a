@@ -1,0 +1,206 @@
+# 为 WF7000A（Rockpi-4B 类 / RK3399）构建可直接写入 TF 卡启动的 Armbian 镜像。
+#
+# 与 stock rockpi-4b 镜像的唯一实质差别：
+#   1. 注入已验证可开机的自定义 DTB（sha256 221c1da4…b23482）
+#   2. /boot/armbianEnv.txt 的 fdtfile 指向该 DTB
+#   3. 预置无头首启参数（见 assets/armbian-firstrun-preset）
+#
+# 为什么不在 Armbian 的 customize-image.sh 里做前两步：
+#   customize_image() 跑在 create_image_from_sdcard_rootfs 之前，
+#   而 /boot 引导脚本的收尾在更晚的 post_debootstrap_tweaks，
+#   会被覆盖。所以改成对「成品 img」做离线手术，时序 100% 确定。
+name: Build WF7000A Armbian card image
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'assets/**'
+      - '.github/workflows/build-armbian-image.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wf7000a-armbian-image
+  cancel-in-progress: false
+
+env:
+  BOARD: rockpi-4b
+  KBRANCH: current
+  RELEASE: trixie
+  DTB_SHA: 221c1da472f4f5a221028a41d821068be9f9accf419ca8d5ee1a6f07cfb23482
+  FDTFILE: rockchip/rk3399-wf7000a.dtb
+  IMGNAME: wf7000a-armbian-trixie-rockpi4b
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: 1. 释放 runner 磁盘（Armbian 构建需 30GB+）
+        uses: descriptinc/free-disk-space@1b4b157593c6801212a2ed488c205e0a810b4592
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 2. Checkout 本仓库
+        uses: actions/checkout@v4
+
+      - name: 3. 校验 DTB 载荷（秒级失败，避免白等一小时）
+        run: |
+          set -euo pipefail
+          base64 -d assets/rk3399-wf7000a.dtb.xz.b64 | xz -dc > /tmp/rk3399-wf7000a.dtb
+          GOT=$(sha256sum /tmp/rk3399-wf7000a.dtb | awk '{print $1}')
+          echo "got : $GOT"
+          echo "want: $DTB_SHA"
+          test "$GOT" = "$DTB_SHA"
+          ls -l /tmp/rk3399-wf7000a.dtb
+          head -c 4 /tmp/rk3399-wf7000a.dtb | xxd
+
+      - name: 4. Checkout Armbian build framework
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref: main
+          path: build
+          fetch-depth: 1
+
+      - name: 5. 构建镜像 BOARD=rockpi-4b / current / trixie
+        working-directory: build
+        run: |
+          set -euo pipefail
+          sudo ./compile.sh requirements
+          sudo chown -R "$USER:$USER" .
+          echo "=== 可用空间 ==="; df -h / | tail -1
+          ./compile.sh build \
+            BOARD="$BOARD" \
+            BRANCH="$KBRANCH" \
+            RELEASE="$RELEASE" \
+            KERNEL_CONFIGURE=no \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no \
+            COMPRESS_OUTPUTIMAGE=sha,img,xz \
+            SHARE_LOG=no \
+            EXPERT=yes
+          echo "=== 产物 ==="; ls -l output/images/
+
+      - name: 6. 镜像手术：注入 DTB / 改 fdtfile / 写首启预设
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          SRC=$(ls build/output/images/*.img.xz | head -1)
+          echo "src=$SRC"
+          xz -dc "$SRC" > "artifacts/${IMGNAME}.img"
+          IMG="artifacts/${IMGNAME}.img"
+          ls -l "$IMG"
+
+          base64 -d assets/rk3399-wf7000a.dtb.xz.b64 | xz -dc > /tmp/rk3399-wf7000a.dtb
+
+          LOOP=$(sudo losetup --show -Pf "$IMG")
+          echo "loop=$LOOP"
+          sudo mkdir -p /mnt/target
+          ROOTPART=""
+          for p in $(ls ${LOOP}p* 2>/dev/null || true); do
+            if sudo mount "$p" /mnt/target 2>/dev/null; then
+              if sudo test -f /mnt/target/boot/armbianEnv.txt; then ROOTPART="$p"; break; fi
+              sudo umount /mnt/target
+            fi
+          done
+          if [ -z "$ROOTPART" ]; then
+            echo "::error::未找到含 /boot/armbianEnv.txt 的分区"
+            sudo losetup -d "$LOOP"
+            exit 1
+          fi
+          echo "rootpart=$ROOTPART"
+
+          T=/mnt/target
+          echo "=== 手术前 /boot 结构 ==="
+          sudo ls -ld "$T"/boot "$T"/boot/dtb* 2>/dev/null || true
+
+          sudo install -m 0644 /tmp/rk3399-wf7000a.dtb "$T/boot/dtb/rockchip/rk3399-wf7000a.dtb"
+          for d in "$T"/boot/dtb-*/rockchip ; do
+            if [ -d "$d" ]; then
+              sudo install -m 0644 /tmp/rk3399-wf7000a.dtb "$d/rk3399-wf7000a.dtb"
+            fi
+          done
+
+          if sudo grep -qE '^[[:space:]]*fdtfile=' "$T/boot/armbianEnv.txt"; then
+            sudo sed -i -E "s|^[[:space:]]*fdtfile=.*|fdtfile=${FDTFILE}|" "$T/boot/armbianEnv.txt"
+          else
+            echo "fdtfile=${FDTFILE}" | sudo tee -a "$T/boot/armbianEnv.txt" >/dev/null
+          fi
+
+          sudo install -m 0600 -o root -g root assets/armbian-firstrun-preset "$T/root/.not_logged_in_yet"
+
+          echo "=== 手术后复核 ==="
+          sudo grep -nE 'fdtfile|^board=|^branch=|^verbosity=' "$T/boot/armbianEnv.txt" || true
+          sudo ls -l "$T/boot/dtb/rockchip/rk3399-wf7000a.dtb"
+          sudo sha256sum "$T/boot/dtb/rockchip/rk3399-wf7000a.dtb"
+          sudo ls -l "$T/root/.not_logged_in_yet"
+
+          sync
+          sudo umount "$T"
+          sudo losetup -d "$LOOP"
+          echo "手术完成"
+
+      - name: 7. 重新压缩 + 生成校验文件
+        run: |
+          set -euo pipefail
+          cd artifacts
+          xz -T0 -6 -v "${IMGNAME}.img"
+          sha256sum "${IMGNAME}.img.xz" | tee "${IMGNAME}.img.xz.sha256"
+          ls -l
+          echo "=== 最终 sha256 ==="
+          cat "${IMGNAME}.img.xz.sha256"
+
+      - name: 8. 上传制品
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf7000a-armbian-image
+          path: |
+            artifacts/*.img.xz
+            artifacts/*.sha256
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 9. 发布到 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag: armbian-image-latest
+          name: WF7000A Armbian 卡刷镜像 (rockpi-4b + 自定义 DTB)
+          prerelease: true
+          files: |
+            artifacts/*.img.xz
+            artifacts/*.sha256
+          body: |
+            Armbian `${{ env.RELEASE }}` / `${{ env.KBRANCH }}` / `BOARD=${{ env.BOARD }}`
+            + WF7000A 自定义 DTB (`${{ env.DTB_SHA }}`)
+
+            写入 TF 卡后插卡启动即可。首次登录口令为一次性临时值，详见仓库内 ARMBIAN-IMAGE.md。
+
+      - name: 10. 失败时把构建日志写回仓库（便于远程排障）
+        if: failure()
+        run: |
+          set -uo pipefail
+          mkdir -p .build-logs
+          {
+            echo "# Armbian build failure @ $(date -u +%FT%TZ)"
+            for f in $(find build/output/logs -name '*.log' -type f 2>/dev/null | sort | tail -5); do
+              echo "=================== $f ==================="
+              tail -n 400 "$f"
+            done
+          } > .build-logs/last-failure.log 2>&1 || true
+          tail -c 500000 .build-logs/last-failure.log > .build-logs/t && mv .build-logs/t .build-logs/last-failure.log || true
+          git config user.name  "wf7000a-ci"
+          git config user.email "wf7000a-ci@users.noreply.github.com"
+          git add -f .build-logs/last-failure.log
+          git commit -m "ci: Armbian build failure log $(date -u +%FT%TZ)" || echo "no changes"
+          git push || echo "push failed"

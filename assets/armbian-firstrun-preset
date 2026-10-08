@@ -1,0 +1,19 @@
+# WF7000A 无头首启预设 —— Armbian firstlogin 会 source 本文件。
+# 只要 PRESET_ROOT_PASSWORD / PRESET_USER_NAME 任一非空，preset_unattended=1，
+# 所有未预设的提问一律取默认值、不会阻塞在终端上，因此无显示器/无串口也能自动完成首启。
+PRESET_NET_CHANGE_DEFAULTS=1
+PRESET_NET_ETHERNET_ENABLED=1
+PRESET_NET_WIFI_ENABLED=0
+PRESET_NET_USE_STATIC=0
+PRESET_USER_SHELL=bash
+SET_LANG_BASED_ON_LOCATION=n
+PRESET_LOCALE=en_US.UTF-8
+PRESET_TIMEZONE=Asia/Shanghai
+PRESET_CONNECT_WIRELESS=n
+# !!! 一次性临时口令，首次登录后立刻改掉：
+#     passwd                    (改 root)
+#     passwd mobius             (改用户)
+PRESET_ROOT_PASSWORD=wf7000a
+PRESET_USER_NAME=mobius
+PRESET_USER_PASSWORD=wf7000a
+PRESET_DEFAULT_REALNAME=Mobius
