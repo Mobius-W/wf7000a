@@ -1,9 +1,12 @@
 # 为 WF7000A（Rockpi-4B 类 / RK3399）构建可直接写入 TF 卡启动的 Armbian 镜像。
 #
 # 与 stock rockpi-4b 镜像的唯一实质差别：
-#   1. 注入已验证可开机的自定义 DTB（sha256 221c1da4…b23482）
+#   1. 注入已验证可开机的自定义 DTB（sha256 a7ce6ea0…a3f86，源 = rk3399-wf7000a.dts）
 #   2. /boot/armbianEnv.txt 的 fdtfile 指向该 DTB
 #   3. 预置无头首启参数（见 assets/armbian-firstrun-preset）
+#
+# 注：板型/发行版标识仍是上游 rockpi-4b（本仓库按用户要求不改身份，
+#     只替换 DTB 与 fdtfile），故 IMGNAME 与 BOARD 保持 rockpi4b 命名。
 #
 # 为什么不在 Armbian 的 customize-image.sh 里做前两步：
 #   customize_image() 跑在 create_image_from_sdcard_rootfs 之前，
@@ -29,7 +32,7 @@ env:
   BOARD: rockpi-4b
   KBRANCH: current
   RELEASE: trixie
-  DTB_SHA: 221c1da472f4f5a221028a41d821068be9f9accf419ca8d5ee1a6f07cfb23482
+  DTB_SHA: a7ce6ea01f92b903512170612ceeeb0c3d101aaac7236fdc5476038af41a3f86
   FDTFILE: rockchip/rk3399-wf7000a.dtb
   IMGNAME: wf7000a-armbian-trixie-rockpi4b
 
