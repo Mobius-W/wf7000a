@@ -174,7 +174,7 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag: armbian-image-latest
+          tag_name: armbian-image-latest
           name: WF7000A Armbian 卡刷镜像 (rockpi-4b + 自定义 DTB)
           prerelease: true
           files: |
