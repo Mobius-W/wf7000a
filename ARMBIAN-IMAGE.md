@@ -8,7 +8,7 @@
 | 项 | 官方 rockpi-4b 镜像 | 本镜像 |
 |---|---|---|
 | 板型 / 内核 / 发行版 | `rockpi-4b` / `current` / `trixie` | **相同**（板子原本跑的就是 `linux-u-boot-rockpi-4b-current` + Debian trixie） |
-| `/boot/dtb*/rockchip/rk3399-wf7000a.dtb` | 无 | **有**（sha256 `221c1da472f4f5a221028a41d821068be9f9accf419ca8d5ee1a6f07cfb23482`） |
+| `/boot/dtb*/rockchip/rk3399-wf7000a.dtb` | 无 | **有**（82590 B，sha256 `a7ce6ea01f92b903512170612ceeeb0c3d101aaac7236fdc5476038af41a3f86`；源 = 仓库根 `rk3399-wf7000a.dts`） |
 | `armbianEnv.txt` 的 `fdtfile` | `rockchip/rk3399-rock-pi-4b.dtb` | `rockchip/rk3399-wf7000a.dtb` |
 | 首启 | 交互式向导 | **无人值守**（预设 root/user/口令/时区/有线 DHCP） |
 
@@ -69,8 +69,9 @@ root：root       口令：wf7000a
 ### 6. 确认 DTB 生效
 ```bash
 cat /proc/device-tree/model
+# 期望 WF7000A RK3399 Board
 sha256sum /boot/dtb/rockchip/rk3399-wf7000a.dtb
-# 期望 221c1da472f4f5a221028a41d821068be9f9accf419ca8d5ee1a6f07cfb23482
+# 期望 a7ce6ea01f92b903512170612ceeeb0c3d101aaac7236fdc5476038af41a3f86
 grep fdtfile /boot/armbianEnv.txt
 ```
 
@@ -94,11 +95,23 @@ sync && sudo umount /mnt/emmc
 
 | 路径 | 作用 |
 |---|---|
+| `rk3399-wf7000a.dts` | **DTB 的源文件（唯一正确来源）**。与上游 `arch/arm64/boot/dts/rockchip/` 同构，可直接随树编译 |
 | `.github/workflows/build-armbian-image.yml` | 构建 + 镜像手术 + 出 Release |
-| `assets/rk3399-wf7000a.dtb.xz.b64` | 自定义 DTB（xz + base64，workflow 里校验 sha256） |
+| `assets/rk3399-wf7000a.dtb.xz.b64` | 自定义 DTB（xz + base64，workflow 里按 `DTB_SHA` 校验） |
+| `assets/rk3399-wf7000a.dtb.GOOD` | **vendor 已知能开机**的旧 DTB（84806 B / `221c1da4…`），仅作回退参照，CI 不使用 |
 | `assets/armbian-firstrun-preset` | 无头首启预设，落到镜像 `/root/.not_logged_in_yet` |
 
-另有历史路线 `.github/workflows/build-dtb.yml`（只编 standalone DTB），与本流程互不影响。
+自行编译（本机或 CI 均可）：
+```bash
+# 需要一个含 rk3399-sapphire.dtsi 的 6.18.y 内核树（如 ophub/linux-6.18.y）
+clang -E -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
+      -I include -I arch/arm64/boot/dts/rockchip rk3399-wf7000a.dts -o /tmp/wf7000a.dts.pre
+dtc -@ -b 0 -I dts -O dtb /tmp/wf7000a.dts.pre -o rk3399-wf7000a.dtb
+sha256sum rk3399-wf7000a.dtb   # 期望 a7ce6ea0…
+```
+
+另有历史路线 `.github/workflows/build-dtb.yml`（编 6.1 树的旧 `rk3399-wf7000.dts`）与
+`build_dtb.sh` / `rk3399-wf7000.dts` / `wf7000.dts`，均**已废弃**，与现役流程无关联，勿再使用。
 
 ## 六、失败排障
 
@@ -174,12 +187,18 @@ DTB 等价性验证的结论是 **新旧 DTB 功能完全等价**（节点 527 =
 
 ## 九、Release 资产
 
-tag：`armbian-image-latest`（prerelease）
+tag：`armbian-image-latest`（prerelease），每次构建覆盖同名资产。
 
-| 资产 | 大小 | sha256 |
-|---|---|---|
-| `wf7000a-armbian-trixie-rockpi4b.img.xz` | 607,616,556 B（解压后 2544 MiB） | `37ddca9f62d69ab3b8a72dc40836383f82b6006217354f94e9973ee7949482c8` |
-| `wf7000a-armbian-trixie-rockpi4b.img.xz.sha256` | 105 B | — |
+| 资产 | 说明 |
+|---|---|
+| `wf7000a-armbian-trixie-rockpi4b.img.xz` | 解压后约 2544 MiB |
+| `wf7000a-armbian-trixie-rockpi4b.img.xz.sha256` | 该次构建对应的校验值 |
+
+> ⚠️ **sha256 不是固定值**：Armbian 构建非可复现（时间戳/包版本），每次跑出来的
+> `.img.xz` 指纹都不同，**一律以同次产出的 `.sha256` 为准**，不要拿历史指纹比对。
+>
+> 当前 Release 上那份仍是**旧载荷**（DTB `221c1da4…`）构建的；本仓库已把载荷换成
+> `a7ce6ea0…`，需要重跑一次 `build-armbian-image.yml` 才会覆盖成新版。
 
 取回：
 ```bash
