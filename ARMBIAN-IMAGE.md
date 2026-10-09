@@ -104,3 +104,84 @@ sync && sudo umount /mnt/emmc
 
 构建失败时 workflow 会把构建日志尾部写回仓库 `.build-logs/last-failure.log`，
 可直接读该文件定位问题，不必爬 Actions 页面。
+
+---
+
+## 七、能不能用 U 盘引导？—— **不能**（三条硬证据）
+
+结论先说：**把这个镜像写到 U 盘上、插到 WF7000A 上，是引导不起来的。**
+不是镜像的问题（镜像本身格式上 SD / USB 通用），是 RK3399 的引导链决定的——
+下面两个独立原因，任一个都足以否定。
+
+**1. BootROM 根本不认 USB 存储设备。**
+RK3399 的 SoC 内部 BootROM，启动介质顺序是**焊死的**：SPI → eMMC → SD 卡。
+USB 不在这个列表里。Pine64 官方 wiki 在 "Different devices" 一节明确列出
+`not directly bootable: NVMe, USB 3, WiFi`；Radxa 官方论坛对同款问题的答复是
+`boot priorities are fixed in hardware: NVM → SDCARD → eMMC → USB`。
+
+**2. USB 只能等 u-boot 起来后由 u-boot 枚举，而 u-boot 把 USB 排在最后。**
+mainline `include/configs/rockchip-common.h` 原文（2026-10-09 取自 master）：
+
+```c
+#ifndef BOOT_TARGETS
+#define BOOT_TARGETS	"mmc1 mmc0 nvme scsi usb pxe dhcp spi"
+#endif
+```
+
+SD 是 `mmc1`、eMMC 是 `mmc0`，**USB 排第 5 位**。
+
+**3. 这块板子的 eMMC 引导是好的**（坏的只有 `/boot` 里那份 DTB）。
+所以 u-boot 一定会先找到 eMMC 上的 `/boot/boot.scr` → 加载 `Image` + 那份坏 DTB
+→ 内核卡死。**它永远走不到 `usb0`**，插 U 盘等于没插。
+
+### 还有一道更硬的坎：Armbian 的 u-boot 没编 USB 大容量存储驱动
+
+| 检查项 | 结果 |
+|---|---|
+| `configs/rock-pi-4-rk3399_defconfig`（u-boot master） | 有 `CONFIG_CMD_USB` / `CONFIG_USB_XHCI_HCD` / `CONFIG_USB_DWC3` / `CONFIG_USB_KEYBOARD` / `CONFIG_USB_HOST_ETHER`，**没有 `CONFIG_USB_STORAGE`** |
+| `config USB_STORAGE` 定义（`drivers/usb/Kconfig:95`） | `bool "USB Mass Storage support"`，**无 `default y`** |
+| 谁 select 它 | 全树只有 `board/tq/tqma6` / `board/intel/slimbootloader` / `arch/arm` 三个无关处 → **不会被隐式打开** |
+| Armbian 是否补这一项 | `config/sources/families/include/rockchip64_common.inc` 与 `patch/u-boot/u-boot-rockchip64/` 均无 |
+
+⇒ 即便 u-boot 真的轮到了 `usb0`，它也**读不了 U 盘**。
+
+**唯一能让 U 盘方案成立的前提**：把 u-boot 换成带 `CONFIG_USB_STORAGE=y`、
+且 `boot_targets` 把 usb 提前的版本（见下面路线 C）。
+
+## 八、不用 TF 卡的四条路
+
+| 路线 | 需要什么 | 丢数据？ | 说明 |
+|---|---|---|---|
+| **A. 串口（USB-TTL）** | 3.3V USB-TTL 线（TX/RX/GND），UART2 / `ttyS2`，1500000 8N1 | ❌ 不丢 | **最省事**。打断 u-boot 后改用发行版自带的 `rk3399-rock-pi-4b.dtb` 手动引导进系统，再修 eMMC 上那份坏 DTB。也能一秒钟看清到底卡在哪一层 |
+| **B. maskrom + rkdeveloptool** | USB-C（OTG）数据线 + **按住 MASKROM 键上电**；Mac 上需装 rkdeveloptool | 整盘写=丢；**只写前 16MiB 引导区=不丢** | Radxa 官方流程 `rkdeveloptool ld` → `db` → `wl`。WF7000A 的 MASKROM/RESET 键位置需现场确认 |
+| **C. 云端重编 u-boot（USB-first）** | 同 B（需要 maskrom 才能写引导区） | ❌ 不丢 | 用同一套 CI 产出 `idbloader.img` + `u-boot.itb`（`CONFIG_USB_STORAGE=y` + `boot_targets="usb0 mmc1 mmc0"`），写进前 16 MiB，之后 U 盘即可直接引导 |
+| **D. 借一张 TF 卡** | 一张 TF 卡 + 读卡器 | ❌ 不丢 | 硬件优先级里 **SD 高于 eMMC**，插卡即引导，理论最短路径 |
+
+### ⚠️ 一个必须先说清的判断
+
+DTB 等价性验证的结论是 **新旧 DTB 功能完全等价**（节点 527 = 527、phandle 357 = 357、
+637 处值差异 100% 归因于 phandle 重编号、`__symbols__` 仅多一个手工命名的 `fusb0_int`）。
+**如果这个结论成立，那这次无法开机就未必是 DTB 造成的**，"把好 DTB 换回去"也未必救得活。
+
+所以动手刷任何东西之前，**建议先接串口看一眼**（路线 A）：
+
+- u-boot 有输出 → 卡在哪一步？
+- 停在 `Starting kernel ...` 之后 → DTB / 内核参数问题
+- 卡在挂载 rootfs → 文件系统损坏（那次硬断电的嫌疑很大）
+- 完全没有输出 → 引导层真损坏
+
+这一眼能省掉一整轮盲目刷机。
+
+## 九、Release 资产
+
+tag：`armbian-image-latest`（prerelease）
+
+| 资产 | 大小 | sha256 |
+|---|---|---|
+| `wf7000a-armbian-trixie-rockpi4b.img.xz` | 607,616,556 B（解压后 2544 MiB） | `37ddca9f62d69ab3b8a72dc40836383f82b6006217354f94e9973ee7949482c8` |
+| `wf7000a-armbian-trixie-rockpi4b.img.xz.sha256` | 105 B | — |
+
+取回：
+```bash
+gh release download armbian-image-latest --repo Mobius-W/wf7000a --pattern "*.img.xz*" --dir .
+```
