@@ -1,0 +1,85 @@
+name: Build RK3399 Loader
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'rkloader/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show runner info
+        run: |
+          uname -a
+          df -h /
+
+      - name: Fetch rkbin
+        run: |
+          git clone --depth 1 https://github.com/rockchip-linux/rkbin.git
+          cd rkbin
+          echo "rkbin HEAD: $(git rev-parse --short HEAD)"
+          echo "--- RK3399MINIALL.ini ---"
+          cat RKBOOT/RK3399MINIALL.ini
+          echo "--- components ---"
+          ls -l bin/rk33/rk3399_ddr_800MHz_v1.30.bin \
+                bin/rk33/rk3399_usbplug_v1.30.bin \
+                bin/rk33/rk3399_miniloader_v1.30.bin
+
+      - name: Build merged loader (standard)
+        run: |
+          cd rkbin
+          ./tools/boot_merger RKBOOT/RK3399MINIALL.ini
+          ls -l rk3399_loader_v1.30.130.bin
+
+      - name: Build merged loader (SPI-NOR variant)
+        run: |
+          cd rkbin
+          ./tools/boot_merger RKBOOT/RK3399MINIALL_SPINOR.ini || echo "spinor variant unavailable"
+
+      - name: Collect outputs and hashes
+        run: |
+          mkdir -p /tmp/out
+          cd rkbin
+          for f in rk3399_loader_v1.30.130.bin rk3399_loader_spinor_v1.30.130.bin; do
+            [ -f "$f" ] && cp "$f" /tmp/out/ && echo "collected $f"
+          done
+          {
+            echo "### rkbin HEAD: $(git rev-parse --short HEAD)"
+            echo "### $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "--- component inputs ---"
+            sha256sum bin/rk33/rk3399_ddr_800MHz_v1.30.bin \
+                      bin/rk33/rk3399_usbplug_v1.30.bin \
+                      bin/rk33/rk3399_miniloader_v1.30.bin
+            echo "--- merged loader outputs ---"
+            sha256sum /tmp/out/*.bin
+          } | tee /tmp/out/SHA256SUMS.txt
+          cp RKBOOT/RK3399MINIALL.ini /tmp/out/
+          ls -l /tmp/out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rk3399-loader-v1.30.130
+          path: /tmp/out/*
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rk-loader-latest
+          prerelease: true
+          name: "RK3399 Loader v1.30.130 (boot_merger, merged)"
+          body: |
+            RK3399 MiniLoaderAll merged by the official `rockchip-linux/rkbin` `tools/boot_merger`
+            from `RKBOOT/RK3399MINIALL.ini`.
+
+            Components (rkbin master):
+            - rk3399_ddr_800MHz_v1.30.bin
+            - rk3399_usbplug_v1.30.bin
+            - rk3399_miniloader_v1.30.bin
+
+            See SHA256SUMS.txt for hashes.
+          files: /tmp/out/*
